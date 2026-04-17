@@ -1,7 +1,32 @@
 # They Are Billions + Hypervisor Crash — Full Troubleshooting Record
 
->[!NOTE]
->The below appears to have fixed the issue, this document will be updated when fully tested / prooved out.
+## TL;DR — Quick Fix Steps
+
+Run these as Administrator, in order, then reboot:
+
+**1. Disable intelppm (fixes BSOD)**
+```powershell
+sc.exe config intelppm start= disabled
+```
+Reboot.
+
+**2. Install DXVK 2.7.1 (fixes game crash)**
+- Download `dxvk-x.x.x.tar.gz` from https://github.com/doitsujin/dxvk/releases
+- Extract `x64\d3d9.dll`
+- Place it in `C:\Program Files (x86)\Steam\steamapps\common\They Are Billions\`
+
+**3. Switch Docker to WSL2 backend**
+Docker Desktop → Settings → General → "Use the WSL 2 based engine" → ON
+
+**4. After any future DISM/Windows Feature change**, re-verify intelppm is still disabled:
+```powershell
+Get-Service intelppm | Select Name,Status,StartType
+# If StartType is not Disabled:
+sc.exe config intelppm start= disabled
+# Then reboot
+```
+
+---
 
 ## System Profile
 
@@ -98,7 +123,7 @@ HyperV-Feature-VirtualMachinePlatform-Client-Package  <- installed
 | `bcdedit /set hypervisorlaunchtype off` | Done — had no effect because Hyper-V feature was installed via DISM, overriding bcdedit |
 | `Disable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All` | Done — returned `RestartNeeded: False` (suspicious), hvservice still running post-reboot |
 
-**What actually fixed the BSOD:**
+**What fixed the BSOD:**
 ```powershell
 # Run as Administrator
 sc.exe config intelppm start= disabled
@@ -126,7 +151,7 @@ sc.exe config intelppm start= disabled
 
 ---
 
-### PENDING TEST — Game Crash (`nvgpucomp64.dll` / CLR corruption)
+### FIXED — Game Crash (`nvgpucomp64.dll` / CLR corruption)
 
 **What was tried but did NOT fix it alone:**
 
@@ -135,36 +160,28 @@ sc.exe config intelppm start= disabled
 | Enable VSync in `Configuration.txt` | Done — but NVCP already had VSync forced on, so game was already capped at 60fps. Left enabled for consistency. |
 | Steam file verification (`steam://validate/644930`) | Triggered — verifies game file integrity |
 
-**What is expected to fix the game crash — DXVK 2.7.1:**
+**What fixed the game crash — DXVK 2.7.1:**
 
 DXVK `d3d9.dll` installed at:
 ```
 C:\Program Files (x86)\Steam\steamapps\common\They Are Billions\d3d9.dll
 ```
 
-**Why it should work:** DXVK is a Vulkan-based implementation of DirectX 9. When the game starts, Windows loads `d3d9.dll` from the game folder first, so DXVK intercepts all DX9 calls before they reach the system `d3d9.dll` or NVIDIA's `nvgpucomp64.dll`. The crash chain is:
+**Why it works:** DXVK is a Vulkan-based implementation of DirectX 9. When the game starts, Windows loads `d3d9.dll` from the game folder first, so DXVK intercepts all DX9 calls before they reach the system `d3d9.dll` or NVIDIA's `nvgpucomp64.dll`. The crash chain is:
 
 ```
 BROKEN chain (before DXVK):
 SlimDX -> system d3d9.dll -> nvgpucomp64.dll -> hypervisor MMIO interference -> crash
 
-NEW chain (after DXVK):
+FIXED chain (with DXVK):
 SlimDX -> DXVK d3d9.dll -> Vulkan -> GPU directly (hypervisor-safe memory model)
 ```
 
 DXVK was purpose-built to run DX9 games inside hypervisor environments (it is the core of Steam's Proton compatibility layer on Linux VMs). Its Vulkan backend does not use the MMIO patterns the hypervisor interferes with.
 
-**Verification after playing:**
-```powershell
-# Check if any new game crashes since DXVK install
-Get-ChildItem 'C:\ProgramData\Microsoft\Windows\WER\ReportArchive' -Filter '*TheyAreBillions*' |
-    Sort-Object LastWriteTime -Descending | Select-Object -First 3 | Select-Object Name, LastWriteTime
-# If newest entry is older than your test session = no new crashes
-```
-
 ---
 
-## If DXVK Fixes It — Reproducible Setup Steps
+## Confirmed Fix — Setup Steps
 
 1. **Disable `intelppm`** (as Administrator, one time):
    ```powershell
@@ -187,36 +204,13 @@ Get-ChildItem 'C:\ProgramData\Microsoft\Windows\WER\ReportArchive' -Filter '*The
 
 ---
 
-## If DXVK Does NOT Fix the Game Crash — Next Steps
-
-Try in order, marking off each:
-
-- [ ] **Roll back NVIDIA driver** — 595.71 is a post-August 2025 release. Try the previous Game Ready Driver. `nvgpucomp64.dll` is an NVIDIA-owned DLL and a driver regression could be contributing.
-
-- [ ] **Disable VirtualMachinePlatform entirely** (breaks Docker WSL2 — use as a test only):
-  ```powershell
-  # As Administrator
-  Disable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform
-  ```
-  Reboot and test game. If stable -> the issue is VMP-specific, not Hyper-V in general. Re-enable afterward.
-
-- [ ] **Run game as Administrator** — changes memory access patterns and may avoid the hypervisor's user-mode MMIO restrictions.
-
-- [ ] **Compatibility mode** on `TheyAreBillions.exe` -> right-click -> Properties -> Compatibility -> "Windows 8" — disables some modern DX9 runtime hooks.
-
-- [ ] **Check Windows Update** — build 26200.8039 may have a pending cumulative update that patches the VirtualMachinePlatform memory interference.
-
-- [ ] **Report to They Are Billions devs** — the `nvgpucomp64.dll` crash with Hyper-V active is reproducible and documented. Their SlimDX wrapper does not guard against device-lost events caused by hypervisor MMIO remapping.
-
----
-
 ## Key File Locations
 
 | File | Purpose |
 |------|---------|
 | `C:\Windows\Minidump\` | Kernel crash dumps — new files here mean a new BSOD occurred |
 | `C:\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_TheyAreBillions.*` | Game crash reports |
-| `C:\Users\TournyMasterBot\Documents\My Games\They Are Billions\ZXLog.txt` | Game session log |
-| `C:\Users\TournyMasterBot\Documents\My Games\They Are Billions\ErrorReport.txt` | Game exception log |
-| `C:\Users\TournyMasterBot\Documents\My Games\They Are Billions\Configuration.txt` | Game config (VSync now set to True) |
+| `%USERPROFILE%/../Documents/My Games/They Are BillionsZXLog.txt` | Game session log |
+| `%USERPROFILE%/../Documents/My Games/They Are BillionsErrorReport.txt` | Game exception log |
+| `%USERPROFILE%/../Documents/My Games/They Are BillionsConfiguration.txt` | Game config (VSync now set to True) |
 | `C:\Program Files (x86)\Steam\steamapps\common\They Are Billions\d3d9.dll` | DXVK 2.7.1 — delete this to revert to native DX9 |
